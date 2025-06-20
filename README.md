@@ -16,7 +16,7 @@ go build -ldflags="-X github.com/adobe/packer-plugin-aquarium/version.VersionPre
 
 4. To install the compiled plugin, run the following command 
 ```shell
-packer plugins install --path packer-plugin-aquarium github.com/adobe/packer-plugin-aquarium
+packer plugins install --path packer-plugin-aquarium github.com/adobe/aquarium
 ```
 
 ### Build on *nix systems

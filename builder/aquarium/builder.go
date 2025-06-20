@@ -18,20 +18,53 @@ package aquarium
 
 import (
 	"context"
+	"crypto/tls"
+	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
 	"github.com/hashicorp/packer-plugin-sdk/common"
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
 	"github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"golang.org/x/crypto/ssh"
 )
 
 const BuilderId = "aquarium.builder"
 
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
-	MockOption          string `mapstructure:"mock"`
+
+	// AquariumFish API connection settings
+	Endpoint              string `mapstructure:"endpoint" required:"true"`
+	Username              string `mapstructure:"username" required:"true"`
+	Password              string `mapstructure:"password" required:"true"`
+	InsecureSkipTLSVerify bool   `mapstructure:"insecure_skip_tls_verify"`
+
+	// Label specification
+	LabelName    string `mapstructure:"label_name" required:"true"`
+	LabelVersion string `mapstructure:"label_version"`
+
+	// Timeout and retry settings
+	ConnectionTimeout string `mapstructure:"connection_timeout"`
+	ConnectionRetries int    `mapstructure:"connection_retries"`
+	AllocationTimeout string `mapstructure:"allocation_timeout"`
+
+	// Additional metadata to pass to the application
+	ApplicationMetadata map[string]any `mapstructure:"application_metadata"`
+
+	// SSH communication settings
+	Communicator communicator.Config `mapstructure:",squash"`
+
+	// Deprecated field for backward compatibility
+	MockOption string `mapstructure:"mock"`
+
+	// Parsed timeout values
+	connectionTimeoutDuration time.Duration
+	allocationTimeoutDuration time.Duration
 }
 
 type Builder struct {
@@ -41,7 +74,7 @@ type Builder struct {
 
 func (b *Builder) ConfigSpec() hcldec.ObjectSpec { return b.config.FlatMapstructure().HCL2Spec() }
 
-func (b *Builder) Prepare(raws ...interface{}) (generatedVars []string, warnings []string, err error) {
+func (b *Builder) Prepare(raws ...any) (generatedVars []string, warnings []string, err error) {
 	err = config.Decode(&b.config, &config.DecodeOpts{
 		PluginType:  "packer.builder.aquarium",
 		Interpolate: true,
@@ -49,32 +82,110 @@ func (b *Builder) Prepare(raws ...interface{}) (generatedVars []string, warnings
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Set default values
+	if b.config.ConnectionTimeout == "" {
+		b.config.ConnectionTimeout = "30m"
+	}
+	if b.config.ConnectionRetries <= 0 {
+		b.config.ConnectionRetries = 60
+	}
+	if b.config.AllocationTimeout == "" {
+		b.config.AllocationTimeout = "10m"
+	}
+
+	// Parse timeout durations
+	b.config.connectionTimeoutDuration, err = time.ParseDuration(b.config.ConnectionTimeout)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid connection_timeout: %v", err)
+	}
+
+	b.config.allocationTimeoutDuration, err = time.ParseDuration(b.config.AllocationTimeout)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid allocation_timeout: %v", err)
+	}
+
+	// Validate required fields
+	if b.config.Endpoint == "" {
+		return nil, nil, fmt.Errorf("endpoint is required")
+	}
+	if b.config.Username == "" {
+		return nil, nil, fmt.Errorf("username is required")
+	}
+	if b.config.Password == "" {
+		return nil, nil, fmt.Errorf("password is required")
+	}
+	if b.config.LabelName == "" {
+		return nil, nil, fmt.Errorf("label_name is required")
+	}
+
+	// Set default SSH communicator
+	if b.config.Communicator.Type == "" {
+		b.config.Communicator.Type = "ssh"
+	}
+
 	// Return the placeholder for the generated data that will become available to provisioners and post-processors.
-	// If the builder doesn't generate any data, just return an empty slice of string: []string{}
-	buildGeneratedData := []string{"GeneratedMockData"}
+	buildGeneratedData := []string{"ApplicationUID", "ResourceUID", "SSHHost", "SSHPort"}
 	return buildGeneratedData, nil, nil
 }
 
 func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (packer.Artifact, error) {
-	steps := []multistep.Step{}
+	// Create HTTP client
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: b.config.InsecureSkipTLSVerify,
+		},
+	}
+	httpClient := &http.Client{Transport: tr}
 
+	// Cleanup is the first one to make sure we did not leave anything behind
+	steps := []multistep.Step{&StepCleanup{
+		Config:     &b.config,
+		HTTPClient: httpClient,
+	}}
+
+	// Add AquariumFish steps
 	steps = append(steps,
-		&StepSayConfig{
-			MockConfig: b.config.MockOption,
+		&StepConnectAPI{
+			Config:     &b.config,
+			HTTPClient: httpClient,
+		},
+		&StepFindLabel{
+			Config:     &b.config,
+			HTTPClient: httpClient,
+		},
+		&StepCreateApplication{
+			Config:     &b.config,
+			HTTPClient: httpClient,
+		},
+		&StepWaitForAllocation{
+			Config:     &b.config,
+			HTTPClient: httpClient,
+		},
+		&StepSetupSSH{
+			Config:     &b.config,
+			HTTPClient: httpClient,
+		},
+		&communicator.StepConnectSSH{
+			Config:    &b.config.Communicator,
+			Host:      commFunc(host),
+			SSHConfig: sshConfigFunc,
 		},
 		new(commonsteps.StepProvision),
+		&StepCreateImage{
+			Config:     &b.config,
+			HTTPClient: httpClient,
+		},
 	)
 
 	// Setup the state bag and initial state for the steps
 	state := new(multistep.BasicStateBag)
 	state.Put("hook", hook)
 	state.Put("ui", ui)
+	state.Put("config", &b.config)
 
 	// Set the value of the generated data that will become available to provisioners.
-	// To share the data with post-processors, use the StateData in the artifact.
-	state.Put("generated_data", map[string]interface{}{
-		"GeneratedMockData": "mock-build-data",
-	})
+	state.Put("generated_data", map[string]any{})
 
 	// Run!
 	b.runner = commonsteps.NewRunner(steps, b.config.PackerConfig, ui)
@@ -85,10 +196,73 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		return nil, err.(error)
 	}
 
+	// Get the generated data
+	generatedData := state.Get("generated_data").(map[string]any)
+
 	artifact := &Artifact{
 		// Add the builder generated data to the artifact StateData so that post-processors
 		// can access them.
-		StateData: map[string]interface{}{"generated_data": state.Get("generated_data")},
+		StateData: map[string]any{"generated_data": generatedData},
 	}
 	return artifact, nil
+}
+
+// commFunc returns the host for SSH communication
+func commFunc(host func(multistep.StateBag) (string, error)) func(multistep.StateBag) (string, error) {
+	return host
+}
+
+// host returns the SSH host from the state
+func host(state multistep.StateBag) (string, error) {
+	sshHost, ok := state.GetOk("ssh_host")
+	if !ok {
+		return "", fmt.Errorf("ssh_host not found in state")
+	}
+	return sshHost.(string), nil
+}
+
+// sshConfigFunc returns a function that dynamically fetches SSH credentials
+func sshConfigFunc(state multistep.StateBag) (*ssh.ClientConfig, error) {
+	config := state.Get("config").(*Config)
+	client := state.Get("api_client").(*APIClient)
+	resource := state.Get("application_resource").(*ApplicationResource)
+	ui := state.Get("ui").(packer.Ui)
+
+	ui.Say("Fetching fresh SSH credentials for new connection...")
+
+	// Get fresh SSH access credentials
+	access, err := client.GetApplicationResourceAccess(resource.UID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get SSH access credentials: %v", err)
+	}
+
+	if access == nil {
+		return nil, fmt.Errorf("SSH access credentials not available")
+	}
+
+	ui.Say("Fresh SSH credentials obtained")
+
+	// Parse the SSH address to get the port
+	_, sshPort, err := ParseSSHAddress(access.Address)
+	if err != nil {
+		sshPort = config.Communicator.SSHPort
+		ui.Say(fmt.Sprintf("Unable to parse SSH port from address %q, using default: %d", access.Address, sshPort))
+	}
+
+	// Update the communicator config with fresh credentials
+	config.Communicator.SSHUsername = access.Username
+	config.Communicator.SSHPort = sshPort
+
+	if access.Password != "" {
+		config.Communicator.SSHPassword = access.Password
+		ui.Say("Using password authentication")
+	}
+
+	if access.Key != "" {
+		config.Communicator.SSHPrivateKey = []byte(access.Key)
+		ui.Say("Using private key authentication")
+	}
+
+	// Use the standard SSH config function with updated credentials
+	return config.Communicator.SSHConfigFunc()(state)
 }

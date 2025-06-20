@@ -26,7 +26,7 @@ import (
 
 func main() {
 	pps := plugin.NewSet()
-	pps.RegisterBuilder("aquarium-builder", new(aquarium.Builder))
+	pps.RegisterBuilder("rest", new(aquarium.Builder))
 	pps.SetVersion(aquariumVersion.PluginVersion)
 	err := pps.Run()
 	if err != nil {

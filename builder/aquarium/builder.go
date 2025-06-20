@@ -30,7 +30,6 @@ import (
 	"github.com/hashicorp/packer-plugin-sdk/multistep/commonsteps"
 	"github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer-plugin-sdk/template/config"
-	"golang.org/x/crypto/ssh"
 )
 
 const BuilderId = "aquarium.builder"
@@ -169,7 +168,7 @@ func (b *Builder) Run(ctx context.Context, ui packer.Ui, hook packer.Hook) (pack
 		&communicator.StepConnectSSH{
 			Config:    &b.config.Communicator,
 			Host:      commFunc(host),
-			SSHConfig: sshConfigFunc,
+			SSHConfig: b.config.Communicator.SSHConfigFunc(),
 		},
 		new(commonsteps.StepProvision),
 		&StepCreateImage{
@@ -219,50 +218,4 @@ func host(state multistep.StateBag) (string, error) {
 		return "", fmt.Errorf("ssh_host not found in state")
 	}
 	return sshHost.(string), nil
-}
-
-// sshConfigFunc returns a function that dynamically fetches SSH credentials
-func sshConfigFunc(state multistep.StateBag) (*ssh.ClientConfig, error) {
-	config := state.Get("config").(*Config)
-	client := state.Get("api_client").(*APIClient)
-	resource := state.Get("application_resource").(*ApplicationResource)
-	ui := state.Get("ui").(packer.Ui)
-
-	ui.Say("Fetching fresh SSH credentials for new connection...")
-
-	// Get fresh SSH access credentials
-	access, err := client.GetApplicationResourceAccess(resource.UID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get SSH access credentials: %v", err)
-	}
-
-	if access == nil {
-		return nil, fmt.Errorf("SSH access credentials not available")
-	}
-
-	ui.Say("Fresh SSH credentials obtained")
-
-	// Parse the SSH address to get the port
-	_, sshPort, err := ParseSSHAddress(access.Address)
-	if err != nil {
-		sshPort = config.Communicator.SSHPort
-		ui.Say(fmt.Sprintf("Unable to parse SSH port from address %q, using default: %d", access.Address, sshPort))
-	}
-
-	// Update the communicator config with fresh credentials
-	config.Communicator.SSHUsername = access.Username
-	config.Communicator.SSHPort = sshPort
-
-	if access.Password != "" {
-		config.Communicator.SSHPassword = access.Password
-		ui.Say("Using password authentication")
-	}
-
-	if access.Key != "" {
-		config.Communicator.SSHPrivateKey = []byte(access.Key)
-		ui.Say("Using private key authentication")
-	}
-
-	// Use the standard SSH config function with updated credentials
-	return config.Communicator.SSHConfigFunc()(state)
 }

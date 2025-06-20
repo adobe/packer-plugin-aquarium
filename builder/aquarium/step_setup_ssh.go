@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
@@ -32,6 +31,7 @@ type StepSetupSSH struct {
 }
 
 // Run executes the step to setup SSH connectivity
+// Run executes the step to setup SSH connectivity
 func (s *StepSetupSSH) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ui := state.Get("ui").(packersdk.Ui)
 	client := state.Get("api_client").(*APIClient)
@@ -39,74 +39,60 @@ func (s *StepSetupSSH) Run(ctx context.Context, state multistep.StateBag) multis
 
 	ui.Say("Setting up SSH connectivity...")
 
-	// Set up timeout for initial SSH access availability check
-	timeoutCtx, cancel := context.WithTimeout(ctx, s.Config.connectionTimeoutDuration)
-	defer cancel()
-
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	retryCount := 0
-	maxRetries := s.Config.ConnectionRetries
-
-	for {
-		select {
-		case <-timeoutCtx.Done():
-			ui.Error(fmt.Sprintf("SSH access availability timeout reached (%s)", s.Config.ConnectionTimeout))
-			state.Put("error", fmt.Errorf("SSH access availability timeout"))
-			return multistep.ActionHalt
-
-		case <-ticker.C:
-			retryCount++
-			if retryCount > maxRetries {
-				ui.Error(fmt.Sprintf("Maximum SSH access availability retries reached (%d)", maxRetries))
-				state.Put("error", fmt.Errorf("SSH access availability retry limit exceeded"))
-				return multistep.ActionHalt
-			}
-
-			ui.Say(fmt.Sprintf("Checking SSH access availability (attempt %d/%d)...", retryCount, maxRetries))
-
-			// Check if SSH access is available (we don't store credentials here since they're dynamic)
-			access, err := client.GetApplicationResourceAccess(resource.UID)
-			if err != nil {
-				ui.Error(fmt.Sprintf("Failed to get SSH access credentials: %v", err))
-				state.Put("error", fmt.Errorf("failed to get SSH access credentials: %v", err))
-				return multistep.ActionHalt
-			}
-
-			if access == nil {
-				ui.Say("SSH access not available yet, retrying...")
-				continue
-			}
-
-			ui.Say("SSH access is available")
-
-			// Parse the SSH address to get the host for connection
-			sshHost, sshPort, err := ParseSSHAddress(access.Address)
-			if err != nil {
-				ui.Say(fmt.Sprintf("Unable to parse SSH address in response %q: %v", access.Address, err))
-				sshHost = s.Config.Communicator.SSHHost
-				sshPort = s.Config.Communicator.SSHPort
-				ui.Say(fmt.Sprintf("Falling back to communicator defaults: %s:%d", sshHost, sshPort))
-			}
-
-			ui.Say(fmt.Sprintf("SSH endpoint: %s:%d", sshHost, sshPort))
-
-			// Store SSH connection details in state (for the host function)
-			state.Put("ssh_host", sshHost)
-			state.Put("ssh_port", sshPort)
-
-			// Update generated data
-			generatedData := state.Get("generated_data").(map[string]any)
-			generatedData["SSHHost"] = sshHost
-			generatedData["SSHPort"] = strconv.Itoa(sshPort)
-			state.Put("generated_data", generatedData)
-
-			ui.Say("SSH connectivity setup completed successfully")
-			ui.Say("Note: SSH credentials will be fetched dynamically for each connection")
-			return multistep.ActionContinue
-		}
+	// Get SSH access credentials
+	access, err := client.GetApplicationResourceAccess(resource.UID)
+	if err != nil {
+		ui.Error(fmt.Sprintf("Failed to get SSH access credentials: %v", err))
+		state.Put("error", fmt.Errorf("failed to get SSH access: %v", err))
+		return multistep.ActionHalt
 	}
+
+	ui.Say("SSH access credentials retrieved successfully")
+
+	// Parse the SSH address
+	sshHost, sshPort, err := ParseSSHAddress(access.Address)
+	if err != nil {
+		ui.Say(fmt.Sprintf("Unable to parse SSH address in response %q: %v", access.Address, err))
+		sshHost = s.Config.Communicator.SSHHost
+		sshPort = s.Config.Communicator.SSHPort
+		ui.Say(fmt.Sprintf("Falling back to communicator defaults: %s:%d", sshHost, sshPort))
+	}
+
+	ui.Say(fmt.Sprintf("SSH endpoint: %s:%d", sshHost, sshPort))
+
+	// Configure SSH settings based on what's available
+	if access.Username != "" {
+		s.Config.Communicator.SSHUsername = access.Username
+		ui.Say(fmt.Sprintf("SSH username: %s", access.Username))
+	}
+
+	if access.Password != "" {
+		s.Config.Communicator.SSHPassword = access.Password
+		ui.Say("SSH password provided")
+	}
+
+	if access.Key != "" {
+		s.Config.Communicator.SSHPrivateKey = []byte(access.Key)
+		ui.Say("SSH private key provided")
+	}
+
+	// Set SSH port
+	s.Config.Communicator.SSHPort = sshPort
+
+	// Store SSH connection details in state
+	state.Put("ssh_host", sshHost)
+	state.Put("ssh_port", sshPort)
+	state.Put("ssh_username", access.Username)
+	state.Put("ssh_access", access)
+
+	// Update generated data
+	generatedData := state.Get("generated_data").(map[string]any)
+	generatedData["SSHHost"] = sshHost
+	generatedData["SSHPort"] = strconv.Itoa(sshPort)
+	state.Put("generated_data", generatedData)
+
+	ui.Say("SSH connectivity setup completed successfully")
+	return multistep.ActionContinue
 }
 
 // Cleanup performs any necessary cleanup

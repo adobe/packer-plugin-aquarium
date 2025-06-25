@@ -84,13 +84,13 @@ func (b *Builder) Prepare(raws ...any) (generatedVars []string, warnings []strin
 
 	// Set default values
 	if b.config.ConnectionTimeout == "" {
-		b.config.ConnectionTimeout = "30m"
+		b.config.ConnectionTimeout = "10m"
 	}
 	if b.config.ConnectionRetries <= 0 {
 		b.config.ConnectionRetries = 60
 	}
 	if b.config.AllocationTimeout == "" {
-		b.config.AllocationTimeout = "10m"
+		b.config.AllocationTimeout = "30m"
 	}
 
 	// Parse timeout durations

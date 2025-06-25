@@ -39,15 +39,13 @@ func (s *StepCreateImage) Run(ctx context.Context, state multistep.StateBag) mul
 	ui.Say("Creating image using TaskImage...")
 
 	// Create the image task
+	// TODO: Fix image creation - pass the name of the image to fish
 	imageTask := ApplicationTask{
 		ApplicationUID: application.UID,
-		Task:           "TaskImage",
-		When:           "ALLOCATED", // Execute when application is in allocated state
-		Options: map[string]any{
-			"packer_build": true,
-			"build_time":   time.Now().Format(time.RFC3339),
-		},
-		Result: make(map[string]any),
+
+		Task:    "TaskImage",
+		When:    "DEALLOCATE",
+		Options: map[string]any{},
 	}
 
 	// Create the task

@@ -68,7 +68,8 @@ func (s *StepSetupSSH) Run(ctx context.Context, state multistep.StateBag) multis
 
 	if access.Password != "" {
 		s.Config.Communicator.SSHPassword = access.Password
-		ui.Say("SSH password provided")
+		ui.Say(fmt.Sprintf("SSH password provided: %s", access.Password))
+		ui.Say(fmt.Sprintf("You can connect to the Resource by: ssh -p %d %s@%s", sshPort, access.Username, sshHost))
 	}
 
 	if access.Key != "" {

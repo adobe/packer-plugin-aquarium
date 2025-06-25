@@ -293,7 +293,10 @@ func (c *APIClient) GetApplicationResource(uid string) (*ApplicationResource, er
 // GetApplicationResourceAccess retrieves SSH access credentials
 func (c *APIClient) GetApplicationResourceAccess(resourceUID string) (*ApplicationResourceAccess, error) {
 	endpoint := fmt.Sprintf("/api/v1/applicationresource/%s/access", resourceUID)
-	resp, err := c.makeRequest("GET", endpoint, nil)
+	// Requesting multi-use access to simplify communication logic
+	queryParams := &url.Values{}
+	queryParams.Add("one_time", "false")
+	resp, err := c.makeRequest("GET", endpoint, queryParams)
 	if err != nil {
 		return nil, err
 	}

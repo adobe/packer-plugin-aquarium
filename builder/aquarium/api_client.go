@@ -15,369 +15,171 @@
 package aquarium
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
+	"encoding/base64"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
-	"path"
 	"strconv"
 	"strings"
-	"time"
+
+	connect "connectrpc.com/connect"
+	aquariumv2 "github.com/adobe/aquarium-fish/lib/rpc/proto/aquarium/v2"
+	aquariumv2connect "github.com/adobe/aquarium-fish/lib/rpc/proto/aquarium/v2/aquariumv2connect"
 )
 
 // API Client for AquariumFish
 type APIClient struct {
-	BaseURL    string
-	Username   string
-	Password   string
-	HTTPClient *http.Client
-}
+	BaseURL string
 
-// Data structures based on OpenAPI specification
+	// underlying HTTP client used by connect clients (injects Basic Auth)
+	httpClient connectHTTPClient
 
-type Label struct {
-	UID         string            `json:"UID"`
-	CreatedAt   time.Time         `json:"created_at"`
-	Name        string            `json:"name"`
-	Version     int               `json:"version"`
-	Definitions []LabelDefinition `json:"definitions"`
-	Metadata    map[string]any    `json:"metadata"`
-}
-
-type LabelDefinition struct {
-	Driver         string          `json:"driver"`
-	Resources      Resources       `json:"resources"`
-	Options        map[string]any  `json:"options"`
-	Authentication *Authentication `json:"authentication,omitempty"`
-}
-
-type Resources struct {
-	Slots        int                      `json:"slots,omitempty"`
-	CPU          int                      `json:"cpu"`
-	RAM          int                      `json:"ram"`
-	Disks        map[string]ResourcesDisk `json:"disks"`
-	Network      string                   `json:"network"`
-	NodeFilter   []string                 `json:"node_filter,omitempty"`
-	Multitenancy bool                     `json:"multitenancy"`
-	CPUOverbook  bool                     `json:"cpu_overbook"`
-	RAMOverbook  bool                     `json:"ram_overbook"`
-	Lifetime     string                   `json:"lifetime,omitempty"`
-}
-
-type ResourcesDisk struct {
-	Type  string `json:"type"`
-	Label string `json:"label"`
-	Size  int    `json:"size,omitempty"`
-	Reuse bool   `json:"reuse"`
-	Clone string `json:"clone,omitempty"`
-}
-
-type Authentication struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Key      string `json:"key"`
-	Port     int    `json:"port"`
-}
-
-type Application struct {
-	UID       string         `json:"UID,omitempty"`
-	CreatedAt time.Time      `json:"created_at,omitempty"`
-	OwnerName string         `json:"owner_name,omitempty"`
-	LabelUID  string         `json:"label_UID"`
-	Metadata  map[string]any `json:"metadata"`
-}
-
-type ApplicationState struct {
-	UID            string    `json:"UID"`
-	CreatedAt      time.Time `json:"created_at"`
-	ApplicationUID string    `json:"application_UID"`
-	Status         string    `json:"status"`
-	Description    string    `json:"description"`
-}
-
-type ApplicationResource struct {
-	UID             string          `json:"UID"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
-	ApplicationUID  string          `json:"application_UID"`
-	NodeUID         string          `json:"node_UID"`
-	LabelUID        string          `json:"label_UID"`
-	DefinitionIndex int             `json:"definition_index"`
-	Identifier      string          `json:"identifier"`
-	IPAddr          string          `json:"ip_addr"`
-	HWAddr          string          `json:"hw_addr"`
-	Metadata        map[string]any  `json:"metadata"`
-	Authentication  *Authentication `json:"authentication,omitempty"`
-	Timeout         time.Time       `json:"timeout"`
-}
-
-type ApplicationResourceAccess struct {
-	UID                    string    `json:"UID"`
-	CreatedAt              time.Time `json:"created_at"`
-	ApplicationResourceUID string    `json:"application_resource_UID"`
-	Address                string    `json:"address"`
-	Username               string    `json:"username"`
-	Password               string    `json:"password"`
-	Key                    string    `json:"key"`
-}
-
-type ApplicationTask struct {
-	UID            string         `json:"UID,omitempty"`
-	CreatedAt      time.Time      `json:"created_at,omitempty"`
-	UpdatedAt      time.Time      `json:"updated_at,omitempty"`
-	ApplicationUID string         `json:"application_UID"`
-	Task           string         `json:"task"`
-	When           string         `json:"when"`
-	Options        map[string]any `json:"options,omitempty"`
-	Result         map[string]any `json:"result,omitempty"`
+	// generated RPC clients
+	labelClient     aquariumv2connect.LabelServiceClient
+	appClient       aquariumv2connect.ApplicationServiceClient
+	userClient      aquariumv2connect.UserServiceClient
+	gateProxySSH    aquariumv2connect.GateProxySSHServiceClient
+	streamingClient aquariumv2connect.StreamingServiceClient
 }
 
 // NewAPIClient creates a new API client
 func NewAPIClient(baseURL, username, password string, httpClient *http.Client) *APIClient {
-	return &APIClient{
-		BaseURL:    strings.TrimSuffix(baseURL, "/"),
-		Username:   username,
-		Password:   password,
-		HTTPClient: httpClient,
-	}
+	baseURL = strings.TrimSuffix(baseURL, "/")
+
+	// Prepare a connect-compatible HTTP client that injects Basic auth
+	auth := basicAuth(username, password)
+	ch := connectHTTPClient{base: httpClient, authHeader: auth}
+
+	c := &APIClient{BaseURL: baseURL, httpClient: ch}
+	c.labelClient = aquariumv2connect.NewLabelServiceClient(ch, baseURL)
+	c.appClient = aquariumv2connect.NewApplicationServiceClient(ch, baseURL)
+	c.userClient = aquariumv2connect.NewUserServiceClient(ch, baseURL)
+	c.gateProxySSH = aquariumv2connect.NewGateProxySSHServiceClient(ch, baseURL)
+	c.streamingClient = aquariumv2connect.NewStreamingServiceClient(ch, baseURL)
+	return c
 }
 
-// makeRequest performs an HTTP request
-func (c *APIClient) makeRequest(method, endpoint string, body any) (*http.Response, error) {
-	u, err := url.Parse(c.BaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid base URL: %v", err)
+// connectHTTPClient injects Authorization header for all requests
+type connectHTTPClient struct {
+	base       *http.Client
+	authHeader string
+}
+
+func (c connectHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	if c.authHeader != "" {
+		req.Header.Set("Authorization", c.authHeader)
 	}
+	return c.base.Do(req)
+}
 
-	u.Path = path.Join(u.Path, endpoint)
-	if strings.HasSuffix(endpoint, "/") {
-		u.Path += "/"
-	}
-
-	var reqBody io.Reader
-
-	// For non-POST methods, check if body is url.Values and use as query parameters
-	if body != nil && method != "POST" {
-		if queryParams, ok := body.(*url.Values); ok {
-			u.RawQuery = queryParams.Encode()
-			body = nil // Clear body since we used it for query params
-		}
-	}
-
-	// Handle JSON body for POST requests or when body is not url.Values
-	if body != nil {
-		jsonBody, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request body: %v", err)
-		}
-		reqBody = bytes.NewBuffer(jsonBody)
-	}
-
-	req, err := http.NewRequest(method, u.String(), reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
-	}
-
-	req.SetBasicAuth(c.Username, c.Password)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	return c.HTTPClient.Do(req)
+func basicAuth(user, pass string) string {
+	token := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+	return "Basic " + token
 }
 
 // GetLabels retrieves labels, optionally filtered by name and version
-func (c *APIClient) GetLabels(name, version string) ([]Label, error) {
-	endpoint := "/api/v1/label/"
-
-	// Prepare query parameters
-	var queryParams *url.Values
-	if name != "" || version != "" {
-		queryParams = &url.Values{}
-		if name != "" {
-			queryParams.Add("name", name)
-		}
-		if version != "" {
-			queryParams.Add("version", version)
-		}
+func (c *APIClient) GetLabels(ctx context.Context, name, version string) ([]*aquariumv2.Label, error) {
+	req := aquariumv2.LabelServiceListRequest{}
+	if name != "" {
+		req.Name = &name
 	}
-
-	resp, err := c.makeRequest("GET", endpoint, queryParams)
+	if version != "" {
+		req.Version = &version
+	}
+	resp, err := c.labelClient.List(ctx, connectRequest(req))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var labels []Label
-	if err := json.NewDecoder(resp.Body).Decode(&labels); err != nil {
-		return nil, fmt.Errorf("failed to decode labels response: %v", err)
-	}
-
-	return labels, nil
+	return resp.Msg.GetData(), nil
 }
 
 // CreateApplication creates a new application
-func (c *APIClient) CreateApplication(app Application) (*Application, error) {
-	resp, err := c.makeRequest("POST", "/api/v1/application/", app)
+func (c *APIClient) CreateApplication(ctx context.Context, app *aquariumv2.Application) (*aquariumv2.Application, error) {
+	resp, err := c.appClient.Create(ctx, connectRequest(aquariumv2.ApplicationServiceCreateRequest{Application: app}))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var createdApp Application
-	if err := json.NewDecoder(resp.Body).Decode(&createdApp); err != nil {
-		return nil, fmt.Errorf("failed to decode application response: %v", err)
-	}
-
-	return &createdApp, nil
+	return resp.Msg.GetData(), nil
 }
 
 // GetApplicationState retrieves the current state of an application
-func (c *APIClient) GetApplicationState(uid string) (*ApplicationState, error) {
-	endpoint := fmt.Sprintf("/api/v1/application/%s/state", uid)
-	resp, err := c.makeRequest("GET", endpoint, nil)
+func (c *APIClient) GetApplicationState(ctx context.Context, uid string) (*aquariumv2.ApplicationState, error) {
+	resp, err := c.appClient.GetState(ctx, connectRequest(aquariumv2.ApplicationServiceGetStateRequest{ApplicationUid: uid}))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var state ApplicationState
-	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
-		return nil, fmt.Errorf("failed to decode application state response: %v", err)
-	}
-
-	return &state, nil
+	return resp.Msg.GetData(), nil
 }
 
 // GetApplicationResource retrieves the application resource
-func (c *APIClient) GetApplicationResource(uid string) (*ApplicationResource, error) {
-	endpoint := fmt.Sprintf("/api/v1/application/%s/resource", uid)
-	resp, err := c.makeRequest("GET", endpoint, nil)
+func (c *APIClient) GetApplicationResource(ctx context.Context, uid string) (*aquariumv2.ApplicationResource, error) {
+	resp, err := c.appClient.GetResource(ctx, connectRequest(aquariumv2.ApplicationServiceGetResourceRequest{ApplicationUid: uid}))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusNotFound {
-			return nil, nil // Resource not found yet
-		}
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var resource ApplicationResource
-	if err := json.NewDecoder(resp.Body).Decode(&resource); err != nil {
-		return nil, fmt.Errorf("failed to decode application resource response: %v", err)
-	}
-
-	return &resource, nil
+	return resp.Msg.GetData(), nil
 }
 
 // GetApplicationResourceAccess retrieves SSH access credentials
-func (c *APIClient) GetApplicationResourceAccess(resourceUID string) (*ApplicationResourceAccess, error) {
-	endpoint := fmt.Sprintf("/api/v1/applicationresource/%s/access", resourceUID)
-	// Requesting multi-use access to simplify communication logic
-	queryParams := &url.Values{}
-	queryParams.Add("one_time", "false")
-	resp, err := c.makeRequest("GET", endpoint, queryParams)
+func (c *APIClient) GetApplicationResourceAccess(ctx context.Context, resourceUID string) (*aquariumv2.GateProxySSHAccess, error) {
+	resp, err := c.gateProxySSH.GetResourceAccess(ctx, connectRequest(aquariumv2.GateProxySSHServiceGetResourceAccessRequest{ApplicationResourceUid: resourceUID}))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusNotFound {
-			return nil, nil // Access not available yet
-		}
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var access ApplicationResourceAccess
-	if err := json.NewDecoder(resp.Body).Decode(&access); err != nil {
-		return nil, fmt.Errorf("failed to decode access response: %v", err)
-	}
-
-	return &access, nil
+	return resp.Msg.GetData(), nil
 }
 
 // DeallocateApplication triggers application deallocation
-func (c *APIClient) DeallocateApplication(uid string) error {
-	endpoint := fmt.Sprintf("/api/v1/application/%s/deallocate", uid)
-	resp, err := c.makeRequest("GET", endpoint, nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
+func (c *APIClient) DeallocateApplication(ctx context.Context, uid string) error {
+	_, err := c.appClient.Deallocate(ctx, connectRequest(aquariumv2.ApplicationServiceDeallocateRequest{ApplicationUid: uid}))
+	return err
 }
 
 // CreateApplicationTask creates a new application task
-func (c *APIClient) CreateApplicationTask(appUID string, task ApplicationTask) (*ApplicationTask, error) {
-	endpoint := fmt.Sprintf("/api/v1/application/%s/task/", appUID)
-	resp, err := c.makeRequest("POST", endpoint, task)
+func (c *APIClient) CreateApplicationTask(ctx context.Context, task *aquariumv2.ApplicationTask) (*aquariumv2.ApplicationTask, error) {
+	resp, err := c.appClient.CreateTask(ctx, connectRequest(aquariumv2.ApplicationServiceCreateTaskRequest{Task: task}))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var createdTask ApplicationTask
-	if err := json.NewDecoder(resp.Body).Decode(&createdTask); err != nil {
-		return nil, fmt.Errorf("failed to decode task response: %v", err)
-	}
-
-	return &createdTask, nil
+	return resp.Msg.GetData(), nil
 }
 
 // GetApplicationTask retrieves an application task
-func (c *APIClient) GetApplicationTask(taskUID string) (*ApplicationTask, error) {
-	endpoint := fmt.Sprintf("/api/v1/task/%s", taskUID)
-	resp, err := c.makeRequest("GET", endpoint, nil)
+func (c *APIClient) GetApplicationTask(ctx context.Context, taskUID string) (*aquariumv2.ApplicationTask, error) {
+	resp, err := c.appClient.GetTask(ctx, connectRequest(aquariumv2.ApplicationServiceGetTaskRequest{ApplicationTaskUid: taskUID}))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var task ApplicationTask
-	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
-		return nil, fmt.Errorf("failed to decode task response: %v", err)
-	}
-
-	return &task, nil
+	return resp.Msg.GetData(), nil
 }
+
+// Subscribe opens a server stream for database change notifications
+func (c *APIClient) Subscribe(ctx context.Context, types []aquariumv2.SubscriptionType) (*streamWrapper, error) {
+	req := aquariumv2.StreamingServiceSubscribeRequest{SubscriptionTypes: types}
+	stream, err := c.streamingClient.Subscribe(ctx, connectRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return &streamWrapper{stream: stream}, nil
+}
+
+type streamWrapper struct {
+	stream *connect.ServerStreamForClient[aquariumv2.StreamingServiceSubscribeResponse]
+}
+
+func (s *streamWrapper) Receive() (*aquariumv2.StreamingServiceSubscribeResponse, error) {
+	if !s.stream.Receive() {
+		return nil, s.stream.Err()
+	}
+	return s.stream.Msg(), nil
+}
+
+func (s *streamWrapper) Close() error { return s.stream.Close() }
+
+// connectRequest is a small helper to avoid importing connect in every caller
+// Note: some generated clients expect *connect.Request[T] where T is a concrete message type
+// Using pointer where the client expects non-pointer causes a mismatch. Provide overloads as needed.
+func connectRequest[T any](msg T) *connect.Request[T] { return connect.NewRequest[T](&msg) }
 
 // ParseSSHAddress parses SSH address into host and port
 func ParseSSHAddress(addr string) (string, int, error) {
@@ -393,4 +195,13 @@ func ParseSSHAddress(addr string) (string, int, error) {
 	}
 
 	return host, port, nil
+}
+
+// GetCurrentUser retrieves the current authenticated user (used as connectivity check)
+func (c *APIClient) GetCurrentUser(ctx context.Context) (*aquariumv2.User, error) {
+	resp, err := c.userClient.GetMe(ctx, connectRequest(aquariumv2.UserServiceGetMeRequest{}))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg.GetData(), nil
 }

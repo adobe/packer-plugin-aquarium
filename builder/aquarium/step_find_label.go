@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strconv"
 
+	aquariumv2 "github.com/adobe/aquarium-fish/lib/rpc/proto/aquarium/v2"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
@@ -47,7 +48,7 @@ func (s *StepFindLabel) Run(ctx context.Context, state multistep.StateBag) multi
 	}
 
 	// Get labels filtered by name and version
-	labels, err := client.GetLabels(s.Config.LabelName, version)
+	labels, err := client.GetLabels(ctx, s.Config.LabelName, version)
 	if err != nil {
 		ui.Error(fmt.Sprintf("Failed to retrieve labels: %v", err))
 		state.Put("error", fmt.Errorf("label retrieval failed: %v", err))
@@ -61,13 +62,13 @@ func (s *StepFindLabel) Run(ctx context.Context, state multistep.StateBag) multi
 	}
 
 	// If no specific version was requested, find the latest version
-	var selectedLabel *Label
+	var selectedLabel *aquariumv2.Label
 	if s.Config.LabelVersion == "" {
 		maxVersion := -1
-		for i, label := range labels {
-			if label.Version > maxVersion {
-				maxVersion = label.Version
-				selectedLabel = &labels[i]
+		for _, label := range labels {
+			if int(label.GetVersion()) > maxVersion {
+				maxVersion = int(label.GetVersion())
+				selectedLabel = label
 			}
 		}
 	} else {
@@ -79,9 +80,9 @@ func (s *StepFindLabel) Run(ctx context.Context, state multistep.StateBag) multi
 			return multistep.ActionHalt
 		}
 
-		for i, label := range labels {
-			if label.Version == requestedVersion {
-				selectedLabel = &labels[i]
+		for _, label := range labels {
+			if int(label.GetVersion()) == requestedVersion {
+				selectedLabel = label
 				break
 			}
 		}
@@ -100,16 +101,16 @@ func (s *StepFindLabel) Run(ctx context.Context, state multistep.StateBag) multi
 	}
 
 	ui.Say(fmt.Sprintf("Found label '%s' version %d (UID: %s)",
-		selectedLabel.Name, selectedLabel.Version, selectedLabel.UID))
+		selectedLabel.GetName(), selectedLabel.GetVersion(), selectedLabel.GetUid()))
 
 	// Validate that the label has at least one definition
-	if len(selectedLabel.Definitions) == 0 {
+	if len(selectedLabel.GetDefinitions()) == 0 {
 		ui.Error("Selected label has no definitions")
 		state.Put("error", fmt.Errorf("label has no definitions"))
 		return multistep.ActionHalt
 	}
 
-	ui.Say(fmt.Sprintf("Label has %d definition(s) available", len(selectedLabel.Definitions)))
+	ui.Say(fmt.Sprintf("Label has %d definition(s) available", len(selectedLabel.GetDefinitions())))
 
 	// Store the selected label for other steps
 	state.Put("selected_label", selectedLabel)

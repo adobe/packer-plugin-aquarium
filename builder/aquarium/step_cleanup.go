@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"time"
 
+	aquariumv2 "github.com/adobe/aquarium-fish/lib/rpc/proto/aquarium/v2"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
@@ -53,19 +54,19 @@ func (s *StepCleanup) Cleanup(state multistep.StateBag) {
 		ui.Say("No application found, skipping cleanup")
 		return
 	}
-	application := app.(*Application)
+	application := app.(*aquariumv2.Application)
 
 	ui.Say("Cleaning up AquariumFish resources...")
 
 	// Trigger application deallocation
-	err := apiClient.DeallocateApplication(application.UID)
+	err := apiClient.DeallocateApplication(context.Background(), application.GetUid())
 	if err != nil {
 		ui.Error(fmt.Sprintf("Failed to deallocate application: %v", err))
 		// Don't halt on cleanup errors, just log them
 		return
 	}
 
-	ui.Say(fmt.Sprintf("Application %s deallocate request sent...", application.UID))
+	ui.Say(fmt.Sprintf("Application %s deallocate request sent...", application.GetUid()))
 
 	// Wait a bit to ensure deallocation starts
 	time.Sleep(5 * time.Second)
@@ -86,21 +87,21 @@ func (s *StepCleanup) Cleanup(state multistep.StateBag) {
 
 		case <-ticker.C:
 			// Check application state
-			appState, err := apiClient.GetApplicationState(application.UID)
+			appState, err := apiClient.GetApplicationState(context.Background(), application.GetUid())
 			if err != nil {
 				ui.Say(fmt.Sprintf("Could not check application state: %v", err))
 				return
 			}
 
-			ui.Say(fmt.Sprintf("Application status: %s", appState.Status))
+			ui.Say(fmt.Sprintf("Application status: %s", appState.GetStatus().String()))
 
-			if appState.Status == "DEALLOCATED" || appState.Status == "RECALLED" {
+			if appState.GetStatus() == aquariumv2.ApplicationState_DEALLOCATED || appState.GetStatus() == aquariumv2.ApplicationState_DEALLOCATE {
 				ui.Say("Application successfully deallocated")
 				return
 			}
 
-			if appState.Status == "ERROR" {
-				ui.Say(fmt.Sprintf("Application in error state during deallocation: %s", appState.Description))
+			if appState.GetStatus() == aquariumv2.ApplicationState_ERROR {
+				ui.Say(fmt.Sprintf("Application in error state during deallocation: %s", appState.GetDescription()))
 				return
 			}
 

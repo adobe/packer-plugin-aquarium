@@ -18,7 +18,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
+	aquariumv2 "github.com/adobe/aquarium-fish/lib/rpc/proto/aquarium/v2"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
@@ -39,23 +41,11 @@ func (s *StepConnectAPI) Run(ctx context.Context, state multistep.StateBag) mult
 	client := NewAPIClient(s.Config.Endpoint, s.Config.Username, s.Config.Password, s.HTTPClient)
 
 	// Test the connection by getting the current user info
-	resp, err := client.makeRequest("GET", "/api/v1/user/me/", nil)
-	if err != nil {
+	ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if _, err := client.GetCurrentUser(ctxTimeout); err != nil {
 		ui.Error(fmt.Sprintf("Failed to connect to AquariumFish API: %v", err))
 		state.Put("error", fmt.Errorf("API connection failed: %v", err))
-		return multistep.ActionHalt
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		ui.Error("Authentication failed. Please check your credentials.")
-		state.Put("error", fmt.Errorf("authentication failed"))
-		return multistep.ActionHalt
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		ui.Error(fmt.Sprintf("API connection test failed with status %d", resp.StatusCode))
-		state.Put("error", fmt.Errorf("API connection test failed"))
 		return multistep.ActionHalt
 	}
 
@@ -63,6 +53,19 @@ func (s *StepConnectAPI) Run(ctx context.Context, state multistep.StateBag) mult
 
 	// Store the API client in state for other steps
 	state.Put("api_client", client)
+
+	// Create subscription stream for updates used by later steps
+	// Subscribe to objects we care about during build
+	subTypes := []aquariumv2.SubscriptionType{
+		aquariumv2.SubscriptionType_SUBSCRIPTION_TYPE_APPLICATION,
+		aquariumv2.SubscriptionType_SUBSCRIPTION_TYPE_APPLICATION_STATE,
+		aquariumv2.SubscriptionType_SUBSCRIPTION_TYPE_APPLICATION_RESOURCE,
+		aquariumv2.SubscriptionType_SUBSCRIPTION_TYPE_APPLICATION_TASK,
+	}
+	stream, err := client.Subscribe(ctx, subTypes)
+	if err == nil {
+		state.Put("subscribe_stream", stream)
+	}
 
 	return multistep.ActionContinue
 }

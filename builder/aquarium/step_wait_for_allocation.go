@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"time"
 
+	aquariumv2 "github.com/adobe/aquarium-fish/lib/rpc/proto/aquarium/v2"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
@@ -34,7 +35,7 @@ type StepWaitForAllocation struct {
 func (s *StepWaitForAllocation) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ui := state.Get("ui").(packersdk.Ui)
 	client := state.Get("api_client").(*APIClient)
-	application := state.Get("application").(*Application)
+	application := state.Get("application").(*aquariumv2.Application)
 
 	ui.Say("Waiting for application to be allocated...")
 
@@ -45,7 +46,7 @@ func (s *StepWaitForAllocation) Run(ctx context.Context, state multistep.StateBa
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	var lastStatus string
+	var lastStatus aquariumv2.ApplicationState_Status
 	for {
 		select {
 		case <-timeoutCtx.Done():
@@ -55,7 +56,7 @@ func (s *StepWaitForAllocation) Run(ctx context.Context, state multistep.StateBa
 
 		case <-ticker.C:
 			// Get current application state
-			appState, err := client.GetApplicationState(application.UID)
+			appState, err := client.GetApplicationState(ctx, application.GetUid())
 			if err != nil {
 				ui.Error(fmt.Sprintf("Failed to get application state: %v", err))
 				state.Put("error", fmt.Errorf("failed to get application state: %v", err))
@@ -63,17 +64,17 @@ func (s *StepWaitForAllocation) Run(ctx context.Context, state multistep.StateBa
 			}
 
 			// Log status changes
-			if appState.Status != lastStatus {
-				ui.Say(fmt.Sprintf("Application status: %s - %s", appState.Status, appState.Description))
-				lastStatus = appState.Status
+			if appState.GetStatus() != lastStatus {
+				ui.Say(fmt.Sprintf("Application status: %s - %s", appState.GetStatus().String(), appState.GetDescription()))
+				lastStatus = appState.GetStatus()
 			}
 
 			switch appState.Status {
-			case "ALLOCATED":
+			case aquariumv2.ApplicationState_ALLOCATED:
 				ui.Say("Application has been allocated successfully!")
 
 				// Get the application resource
-				resource, err := client.GetApplicationResource(application.UID)
+				resource, err := client.GetApplicationResource(ctx, application.GetUid())
 				if err != nil {
 					ui.Error(fmt.Sprintf("Failed to get application resource: %v", err))
 					state.Put("error", fmt.Errorf("failed to get application resource: %v", err))
@@ -86,30 +87,30 @@ func (s *StepWaitForAllocation) Run(ctx context.Context, state multistep.StateBa
 				}
 
 				ui.Say(fmt.Sprintf("Application resource ready (UID: %s, IP: %s)",
-					resource.UID, resource.IPAddr))
+					resource.GetUid(), resource.GetIpAddr()))
 
 				// Store the resource for other steps
 				state.Put("application_resource", resource)
 
 				// Update generated data
 				generatedData := state.Get("generated_data").(map[string]any)
-				generatedData["ResourceUID"] = resource.UID
+				generatedData["ResourceUID"] = resource.GetUid()
 				state.Put("generated_data", generatedData)
 
 				return multistep.ActionContinue
 
-			case "ERROR", "DEALLOCATED", "RECALLED":
+			case aquariumv2.ApplicationState_ERROR, aquariumv2.ApplicationState_DEALLOCATED, aquariumv2.ApplicationState_DEALLOCATE:
 				ui.Error(fmt.Sprintf("Application failed with status: %s - %s",
-					appState.Status, appState.Description))
+					appState.GetStatus().String(), appState.GetDescription()))
 				state.Put("error", fmt.Errorf("application failed: %s", appState.Status))
 				return multistep.ActionHalt
 
-			case "NEW", "ELECTED", "DEALLOCATE":
+			case aquariumv2.ApplicationState_NEW, aquariumv2.ApplicationState_ELECTED:
 				// These are intermediate states, continue waiting
 				continue
 
 			default:
-				ui.Say(fmt.Sprintf("Unknown application status: %s", appState.Status))
+				ui.Say(fmt.Sprintf("Unknown application status: %s", appState.GetStatus().String()))
 				continue
 			}
 		}

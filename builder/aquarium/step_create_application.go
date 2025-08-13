@@ -20,8 +20,10 @@ import (
 	"net/http"
 	"time"
 
+	aquariumv2 "github.com/adobe/aquarium-fish/lib/rpc/proto/aquarium/v2"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // StepCreateApplication creates an application in AquariumFish
@@ -34,7 +36,7 @@ type StepCreateApplication struct {
 func (s *StepCreateApplication) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ui := state.Get("ui").(packersdk.Ui)
 	client := state.Get("api_client").(*APIClient)
-	selectedLabel := state.Get("selected_label").(*Label)
+	selectedLabel := state.Get("selected_label").(*aquariumv2.Label)
 
 	ui.Say("Creating application...")
 
@@ -54,26 +56,27 @@ func (s *StepCreateApplication) Run(ctx context.Context, state multistep.StateBa
 	metadata["PACKER_BUILD_TIME"] = time.Now().Format(time.RFC3339)
 
 	// Create the application
-	app := Application{
-		LabelUID:  selectedLabel.UID,
-		Metadata:  metadata,
+	metaStruct, _ := structpb.NewStruct(metadata)
+	app := &aquariumv2.Application{
+		LabelUid: selectedLabel.GetUid(),
+		Metadata: metaStruct,
 	}
 
-	createdApp, err := client.CreateApplication(app)
+	createdApp, err := client.CreateApplication(ctx, app)
 	if err != nil {
 		ui.Error(fmt.Sprintf("Failed to create application: %v", err))
 		state.Put("error", fmt.Errorf("application creation failed: %v", err))
 		return multistep.ActionHalt
 	}
 
-	ui.Say(fmt.Sprintf("Application created successfully (UID: %s)", createdApp.UID))
+	ui.Say(fmt.Sprintf("Application created successfully (UID: %s)", createdApp.GetUid()))
 
 	// Store the created application for other steps
 	state.Put("application", createdApp)
 
 	// Update generated data
 	generatedData := state.Get("generated_data").(map[string]any)
-	generatedData["ApplicationUID"] = createdApp.UID
+	generatedData["ApplicationUID"] = createdApp.GetUid()
 	state.Put("generated_data", generatedData)
 
 	return multistep.ActionContinue

@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strconv"
 
+	aquariumv2 "github.com/adobe/aquarium-fish/lib/rpc/proto/aquarium/v2"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 )
@@ -35,12 +36,12 @@ type StepSetupSSH struct {
 func (s *StepSetupSSH) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ui := state.Get("ui").(packersdk.Ui)
 	client := state.Get("api_client").(*APIClient)
-	resource := state.Get("application_resource").(*ApplicationResource)
+	resource := state.Get("application_resource").(*aquariumv2.ApplicationResource)
 
 	ui.Say("Setting up SSH connectivity...")
 
 	// Get SSH access credentials
-	access, err := client.GetApplicationResourceAccess(resource.UID)
+	access, err := client.GetApplicationResourceAccess(ctx, resource.GetUid())
 	if err != nil {
 		ui.Error(fmt.Sprintf("Failed to get SSH access credentials: %v", err))
 		state.Put("error", fmt.Errorf("failed to get SSH access: %v", err))
@@ -50,9 +51,9 @@ func (s *StepSetupSSH) Run(ctx context.Context, state multistep.StateBag) multis
 	ui.Say("SSH access credentials retrieved successfully")
 
 	// Parse the SSH address
-	sshHost, sshPort, err := ParseSSHAddress(access.Address)
+	sshHost, sshPort, err := ParseSSHAddress(access.GetAddress())
 	if err != nil {
-		ui.Say(fmt.Sprintf("Unable to parse SSH address in response %q: %v", access.Address, err))
+		ui.Say(fmt.Sprintf("Unable to parse SSH address in response %q: %v", access.GetAddress(), err))
 		sshHost = s.Config.Communicator.SSHHost
 		sshPort = s.Config.Communicator.SSHPort
 		ui.Say(fmt.Sprintf("Falling back to communicator defaults: %s:%d", sshHost, sshPort))
@@ -61,19 +62,19 @@ func (s *StepSetupSSH) Run(ctx context.Context, state multistep.StateBag) multis
 	ui.Say(fmt.Sprintf("SSH endpoint: %s:%d", sshHost, sshPort))
 
 	// Configure SSH settings based on what's available
-	if access.Username != "" {
-		s.Config.Communicator.SSHUsername = access.Username
-		ui.Say(fmt.Sprintf("SSH username: %s", access.Username))
+	if access.GetUsername() != "" {
+		s.Config.Communicator.SSHUsername = access.GetUsername()
+		ui.Say(fmt.Sprintf("SSH username: %s", access.GetUsername()))
 	}
 
-	if access.Password != "" {
-		s.Config.Communicator.SSHPassword = access.Password
-		ui.Say(fmt.Sprintf("SSH password provided: %s", access.Password))
-		ui.Say(fmt.Sprintf("You can connect to the Resource by: ssh -p %d %s@%s", sshPort, access.Username, sshHost))
+	if access.GetPassword() != "" {
+		s.Config.Communicator.SSHPassword = access.GetPassword()
+		ui.Say(fmt.Sprintf("SSH password provided: %s", access.GetPassword()))
+		ui.Say(fmt.Sprintf("You can connect to the Resource by: ssh -p %d %s@%s", sshPort, access.GetUsername(), sshHost))
 	}
 
-	if access.Key != "" {
-		s.Config.Communicator.SSHPrivateKey = []byte(access.Key)
+	if access.GetKey() != "" {
+		s.Config.Communicator.SSHPrivateKey = []byte(access.GetKey())
 		ui.Say("SSH private key provided")
 	}
 
@@ -83,7 +84,7 @@ func (s *StepSetupSSH) Run(ctx context.Context, state multistep.StateBag) multis
 	// Store SSH connection details in state
 	state.Put("ssh_host", sshHost)
 	state.Put("ssh_port", sshPort)
-	state.Put("ssh_username", access.Username)
+	state.Put("ssh_username", access.GetUsername())
 	state.Put("ssh_access", access)
 
 	// Update generated data

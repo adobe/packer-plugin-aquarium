@@ -20,8 +20,10 @@ import (
 	"net/http"
 	"time"
 
+	aquariumv2 "github.com/adobe/aquarium-fish/lib/rpc/proto/aquarium/v2"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // StepCreateImage creates an image using the TaskImage functionality
@@ -34,29 +36,29 @@ type StepCreateImage struct {
 func (s *StepCreateImage) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ui := state.Get("ui").(packersdk.Ui)
 	client := state.Get("api_client").(*APIClient)
-	application := state.Get("application").(*Application)
+	application := state.Get("application").(*aquariumv2.Application)
 
 	ui.Say("Creating image using TaskImage...")
 
 	// Create the image task
 	// TODO: Fix image creation - pass the name of the image to fish
-	imageTask := ApplicationTask{
-		ApplicationUID: application.UID,
-
-		Task:    "TaskImage",
-		When:    "DEALLOCATE",
-		Options: map[string]any{},
+	options, _ := structpb.NewStruct(map[string]any{})
+	imageTask := &aquariumv2.ApplicationTask{
+		ApplicationUid: application.GetUid(),
+		Task:           "TaskImage",
+		When:           aquariumv2.ApplicationState_DEALLOCATE,
+		Options:        options,
 	}
 
 	// Create the task
-	createdTask, err := client.CreateApplicationTask(application.UID, imageTask)
+	createdTask, err := client.CreateApplicationTask(ctx, imageTask)
 	if err != nil {
 		ui.Error(fmt.Sprintf("Failed to create image task: %v", err))
 		state.Put("error", fmt.Errorf("image task creation failed: %v", err))
 		return multistep.ActionHalt
 	}
 
-	ui.Say(fmt.Sprintf("Image task created (UID: %s)", createdTask.UID))
+	ui.Say(fmt.Sprintf("Image task created (UID: %s)", createdTask.GetUid()))
 
 	// Set up timeout for image creation
 	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Minute) // Allow more time for image creation
@@ -76,7 +78,7 @@ func (s *StepCreateImage) Run(ctx context.Context, state multistep.StateBag) mul
 
 		case <-ticker.C:
 			// Get current task status
-			currentTask, err := client.GetApplicationTask(createdTask.UID)
+			currentTask, err := client.GetApplicationTask(ctx, createdTask.GetUid())
 			if err != nil {
 				ui.Error(fmt.Sprintf("Failed to get task status: %v", err))
 				state.Put("error", fmt.Errorf("failed to get task status: %v", err))
@@ -84,26 +86,26 @@ func (s *StepCreateImage) Run(ctx context.Context, state multistep.StateBag) mul
 			}
 
 			// Check if task has results (indicating completion)
-			if currentTask.Result != nil && len(currentTask.Result) > 0 {
+			if currentTask.GetResult() != nil && len(currentTask.GetResult().AsMap()) > 0 {
 				ui.Say("Image creation completed!")
 
 				// Check for success/failure in results
-				if status, exists := currentTask.Result["status"]; exists {
+				if status, exists := currentTask.GetResult().AsMap()["status"]; exists {
 					if status == "success" || status == "completed" {
 						ui.Say("Image created successfully")
 
 						// Check for image information in results
-						if imageInfo, exists := currentTask.Result["image"]; exists {
+						if imageInfo, exists := currentTask.GetResult().AsMap()["image"]; exists {
 							ui.Say(fmt.Sprintf("Image information: %v", imageInfo))
 						}
 
-						if imagePath, exists := currentTask.Result["image_path"]; exists {
+						if imagePath, exists := currentTask.GetResult().AsMap()["image_path"]; exists {
 							ui.Say(fmt.Sprintf("Image path: %s", imagePath))
 						}
 
 						// Store image task results
 						state.Put("image_task", currentTask)
-						state.Put("image_results", currentTask.Result)
+						state.Put("image_results", currentTask.GetResult().AsMap())
 
 						return multistep.ActionContinue
 					} else if status == "failed" || status == "error" {
@@ -116,7 +118,7 @@ func (s *StepCreateImage) Run(ctx context.Context, state multistep.StateBag) mul
 				// If no explicit status, assume success if results are present
 				ui.Say("Image creation appears to have completed")
 				state.Put("image_task", currentTask)
-				state.Put("image_results", currentTask.Result)
+				state.Put("image_results", currentTask.GetResult().AsMap())
 				return multistep.ActionContinue
 			}
 

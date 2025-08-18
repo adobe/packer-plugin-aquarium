@@ -3,14 +3,13 @@ module github.com/adobe/packer-plugin-aquarium
 go 1.23.2
 
 require (
+	connectrpc.com/connect v1.18.1
 	github.com/adobe/aquarium-fish v0.9.0
 	github.com/hashicorp/hcl/v2 v2.19.1
 	github.com/hashicorp/packer-plugin-sdk v0.6.1
 	github.com/zclconf/go-cty v1.13.3
 	google.golang.org/protobuf v1.36.7
 )
-
-replace github.com/adobe/aquarium-fish v0.9.0 => ../aquarium-fish
 
 require (
 	cel.dev/expr v0.24.0 // indirect
@@ -21,7 +20,6 @@ require (
 	cloud.google.com/go/iam v1.5.2 // indirect
 	cloud.google.com/go/monitoring v1.24.2 // indirect
 	cloud.google.com/go/storage v1.50.0 // indirect
-	connectrpc.com/connect v1.18.1 // indirect
 	github.com/Azure/go-ntlmssp v0.0.0-20200615164410-66371956d46c // indirect
 	github.com/ChrisTrenkamp/goxpath v0.0.0-20210404020558-97928f7e12b6 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.27.0 // indirect

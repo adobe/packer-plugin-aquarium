@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
@@ -105,14 +106,14 @@ func (b *Builder) Prepare(raws ...any) (generatedVars []string, warnings []strin
 	}
 
 	// Validate required fields
-	if b.config.Endpoint == "" {
-		return nil, nil, fmt.Errorf("endpoint is required")
+	if _, err := url.Parse(b.config.Endpoint); b.config.Endpoint == "" || err != nil {
+		return nil, nil, fmt.Errorf("aquarium endpoint is incorrect: %v", err)
 	}
 	if b.config.Username == "" {
-		return nil, nil, fmt.Errorf("username is required")
+		return nil, nil, fmt.Errorf("aquarium username is required")
 	}
 	if b.config.Password == "" {
-		return nil, nil, fmt.Errorf("password is required")
+		return nil, nil, fmt.Errorf("aquarium password is required")
 	}
 	if b.config.LabelName == "" {
 		return nil, nil, fmt.Errorf("label_name is required")

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	aquariumv2 "github.com/adobe/aquarium-fish/lib/rpc/proto/aquarium/v2"
@@ -38,7 +39,12 @@ func (s *StepConnectAPI) Run(ctx context.Context, state multistep.StateBag) mult
 	ui.Say("Connecting to AquariumFish API...")
 
 	// Create API client
-	client := NewAPIClient(s.Config.Endpoint, s.Config.Username, s.Config.Password, s.HTTPClient)
+	endpointURL, _ := url.Parse(s.Config.Endpoint)
+	if endpointURL.Path == "" {
+		// Setting "grpc" if the path is empty
+		endpointURL.Path = "grpc"
+	}
+	client := NewAPIClient(endpointURL.String(), s.Config.Username, s.Config.Password, s.HTTPClient)
 
 	// Test the connection by getting the current user info
 	ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)

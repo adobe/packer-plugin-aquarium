@@ -122,7 +122,12 @@ func (c *APIClient) GetApplicationResource(ctx context.Context, uid string) (*aq
 
 // GetApplicationResourceAccess retrieves SSH access credentials
 func (c *APIClient) GetApplicationResourceAccess(ctx context.Context, resourceUID string) (*aquariumv2.GateProxySSHAccess, error) {
-	resp, err := c.gateProxySSH.GetResourceAccess(ctx, connectRequest(aquariumv2.GateProxySSHServiceGetResourceAccessRequest{ApplicationResourceUid: resourceUID}))
+	// Receiving static credential because Packer has no proper mechanism to use OTP
+	static := true
+	resp, err := c.gateProxySSH.GetResourceAccess(ctx, connectRequest(aquariumv2.GateProxySSHServiceGetResourceAccessRequest{
+		ApplicationResourceUid: resourceUID,
+		Static:                 &static,
+	}))
 	if err != nil {
 		return nil, err
 	}
